@@ -1,0 +1,108 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+  push:
+
+env:
+  version: "FIREFOX_141_0_3_RELEASE"
+  rust_version: 1.86.0
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc, aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu]
+
+    steps:
+      - name: Maximize build space
+        uses: AdityaGarg8/remove-unwanted-software@v4.1
+        with:
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+          remove-large-packages: "true"
+          remove-cached-tools: "true"
+          remove-swapfile: "true"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check disk space
+        run: df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y msitools
+
+      - name: Fetch source
+        run: |
+          git clone --branch ${version} --depth 1 https://github.com/mozilla-firefox/firefox.git cf_source_dir
+
+      - name: Setup and bootstrap
+        run: |
+          cd cf_source_dir && ./mach --no-interactive bootstrap --application-choice=browser
+          git clone --depth 1 https://github.com/mozilla-l10n/firefox-l10n.git $HOME/.mozbuild/l10n-central
+
+      - name: Create swap space
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Build
+        run: |
+          export target=${{ matrix.target }}
+          python3 patch.py
+          rustc -vV
+          ~/.mozbuild/clang/bin/ld.lld -V
+          cd cf_source_dir
+          /usr/bin/time -v ./mach build
+          ./mach package
+          for file in obj-*/dist/firefox-*.en-US.*.{zip,tar.xz,dmg}; do
+            if [[ "$file" != *xpt_artifacts* ]]; then
+              export MOZ_ARTIFACT_FILE=$(realpath "$file")
+              break
+            fi
+          done
+          ./mach build installers-zh-CN
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            cf_source_dir/obj-*/dist/*.tar.xz
+            cf_source_dir/obj-*/dist/*.dmg
+            cf_source_dir/obj-*/dist/*.zip
+
+  release:
+    needs: build
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          draft: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
