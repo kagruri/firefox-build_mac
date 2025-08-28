@@ -5,7 +5,7 @@ on:
   push:
 
 env:
-  version: "FIREFOX_142_0_RELEASE"
+  version: "FIREFOX_142_0_1_RELEASE"
   rust_version: 1.86.0
 
 jobs:
